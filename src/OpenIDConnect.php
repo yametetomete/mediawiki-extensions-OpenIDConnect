@@ -30,6 +30,7 @@ class OpenIDConnect extends PluggableAuth {
 
 	private $subject;
 	private $issuer;
+	private static $roles = [];
 
 	const OIDC_SUBJECT_SESSION_KEY = 'OpenIDConnectSubject';
 	const OIDC_ISSUER_SESSION_KEY = 'OpenIDConnectIssuer';
@@ -168,9 +169,14 @@ class OpenIDConnect extends PluggableAuth {
 					', Email: ' . $email . ', Subject: ' . $this->subject .
 					', Issuer: ' . $this->issuer );
 
+				$accessToken = $oidc->getAccessTokenPayload();
+
 				list( $id, $username ) =
 					$this->findUser( $this->subject, $this->issuer );
 				if ( !is_null( $id ) ) {
+					if ( isset( $accessToken->realm_access->roles ) ) {
+						self::$roles[$id] = $accessToken->realm_access->roles;
+					}
 					wfDebugLog( 'OpenID Connect',
 						'Found user with matching subject and issuer.' . PHP_EOL );
 					return true;
@@ -184,6 +190,9 @@ class OpenIDConnect extends PluggableAuth {
 						PHP_EOL );
 					list( $id, $username ) = $this->getMigratedIdByEmail( $email );
 					if ( !is_null( $id ) ) {
+						if ( isset( $accessToken->realm_access->roles ) ) {
+							self::$roles[$id] = $accessToken->realm_access->roles;
+						}
 						$this->saveExtraAttributes( $id );
 						wfDebugLog( 'OpenID Connect', 'Migrated user ' . $username .
 							' by email: ' . $email . '.' . PHP_EOL );
@@ -201,6 +210,9 @@ class OpenIDConnect extends PluggableAuth {
 						PHP_EOL );
 					$id = $this->getMigratedIdByUserName( $preferred_username );
 					if ( !is_null( $id ) ) {
+						if ( isset( $accessToken->realm_access->roles ) ) {
+							self::$roles[$id] = $accessToken->realm_access->roles;
+						}
 						$this->saveExtraAttributes( $id );
 						wfDebugLog( 'OpenID Connect', 'Migrated user by username: ' .
 							$preferred_username . '.' . PHP_EOL );
@@ -220,6 +232,11 @@ class OpenIDConnect extends PluggableAuth {
 					self::OIDC_SUBJECT_SESSION_KEY, $this->subject );
 				$authManager->setAuthenticationSessionData(
 					self::OIDC_ISSUER_SESSION_KEY, $this->issuer );
+
+				if ( isset( $accessToken->realm_access->roles ) ) {
+					self::$roles[$id] = $accessToken->realm_access->roles;
+				}
+
 				return true;
 			}
 
@@ -472,6 +489,34 @@ class OpenIDConnect extends PluggableAuth {
 		} else {
 			$updater->output(
 				'...user table does not have subject and issuer columns.' . PHP_EOL );
+		}
+	}
+
+	/**
+	 * @since 5.2
+	 * Update MediaWiki group membership of the authenticated user.
+	 * Implements the PluggableAuthPopulateGroups hook from PluggableAuth
+	 * to map groups from OpenID roles.
+	 *
+	 * @param User $user to get groups for
+	 */
+	public static function populateGroups( User $user ) {
+		$granted = array();
+		if ( isset( $GLOBALS['wgOpenIDConnect_GroupMap'] ) ) {
+			foreach ( $GLOBALS['wgOpenIDConnect_GroupMap'] as $role => $groups ) {
+				if ( in_array( $role, self::$roles[$user->getID()] ) ) {
+					foreach ( $groups as $group ) {
+						$user->addGroup( $group );
+						array_push($granted, $group);
+					}
+				} else {
+					foreach ( $groups as $group ) {
+						if ( !in_array( $group, $granted ) ) {
+							$user->removeGroup( $group );
+						}
+					}
+				}
+			}
 		}
 	}
 }
